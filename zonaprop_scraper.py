@@ -9,6 +9,8 @@ from requests.adapters import HTTPAdapter
 from requests.packages.urllib3.util.retry import Retry
 # from ratelimit import limits, sleep_and_retry
 import random
+from datetime import date
+
 
 # Set up logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -43,6 +45,38 @@ def rate_limited_request(session, url, headers):
     except requests.RequestException as e:
         logger.error(f"Failed to fetch {url}: {e}")
         return None
+
+
+def get_all_page_urls(start_url, session, max_pages=None):
+    logger.info(f"Getting all page URLs starting from: {start_url}")
+    page_urls = [start_url]
+    current_url = start_url
+    page_num = 1
+
+    while current_url:
+        response = rate_limited_request(session, current_url, headers={'User-Agent': 'Mozilla/5.0'})
+        if not response:
+            break
+
+        soup = BeautifulSoup(response.content, 'html.parser')
+        current_page = int(re.search(r'PAGING_(\d+)', str(soup)).group(1))
+        next_page = soup.find('a', attrs={'data-qa': f'PAGING_{current_page + 1}'})
+
+        if next_page:
+            next_page_url = f"https://www.zonaprop.com.ar{next_page['href']}"
+            page_urls.append(next_page_url)
+            current_url = next_page_url
+            page_num += 1
+            logger.info(f"Found page {page_num}: {next_page_url}")
+        else:
+            current_url = None
+
+        if max_pages and page_num >= max_pages:
+            logger.info(f"Reached maximum number of pages ({max_pages})")
+            break
+
+    logger.info(f"Found a total of {len(page_urls)} pages")
+    return page_urls
 
 
 def scrape_listing_details(session, url):
@@ -120,19 +154,28 @@ def scrape_zonaprop_page(url, session):
     response = rate_limited_request(session, url, headers)
     if not response:
         logger.error(f"Failed to get response from {url}")
-        return [], None
+        return []
 
     soup = BeautifulSoup(response.content, 'html.parser')
-
     listings = []
     listing_containers = soup.find_all('div', class_='PostingCardLayout-sc-i1odl-0')
 
     logger.info(f"Found {len(listing_containers)} listings on this page")
 
+    current_date = date.today().isoformat()  # Get current date in ISO format (YYYY-MM-DD)
+
     for index, listing in enumerate(listing_containers, start=1):
         logger.info(f"Processing listing {index} of {len(listing_containers)}")
         try:
+            listing_url = f"https://www.zonaprop.com.ar{safe_extract(listing, 'a', 'href')}"
+
+            # Extract ID from the URL
+            id_match = re.search(r'-(\d+)\.html$', listing_url)
+            listing_id = id_match.group(1) if id_match else None
+
             item = {
+                'id': listing_id,
+                'date': current_date,
                 'price': safe_extract(listing, 'div[data-qa="POSTING_CARD_PRICE"]'),
                 'expenses': safe_extract(listing, 'div[data-qa="expensas"]'),
                 'location_address': safe_extract(listing, 'div.postingAddress'),
@@ -142,7 +185,6 @@ def scrape_zonaprop_page(url, session):
                 'url': f"https://www.zonaprop.com.ar{safe_extract(listing, 'a', 'href')}",
             }
 
-            # Add detailed information
             logger.info(f"Scraping detailed information for listing: {item['url']}")
             detailed_info = scrape_listing_details(session, item['url'])
             item.update(detailed_info)
@@ -152,49 +194,26 @@ def scrape_zonaprop_page(url, session):
         except Exception as e:
             logger.error(f"Error parsing listing {index}: {e}")
 
-    current_page = int(re.search(r'PAGING_(\d+)', str(soup)).group(1))
-    next_page = soup.find('a', attrs={'data-qa': f'PAGING_{current_page + 1}'})
-    next_page_url = f"https://www.zonaprop.com.ar{next_page['href']}" if next_page else None
-
-    logger.info(f"Finished scraping page: {url}")
-    if next_page_url:
-        logger.info(f"Next page URL: {next_page_url}")
-    else:
-        logger.info("No next page found")
-
-    return listings, next_page_url
+    return listings
 
 
 def scrape_zonaprop(start_url, max_pages=None):
-    all_listings = []
-    current_url = start_url
-    page_num = 1
     session = create_session_with_retries()
+    page_urls = get_all_page_urls(start_url, session, max_pages)
+    all_listings = []
 
-    while current_url:
-        logger.info(f"Scraping page {page_num}")
-        page_listings, next_page_url = scrape_zonaprop_page(current_url, session)
+    for page_num, page_url in enumerate(page_urls, start=1):
+        logger.info(f"Scraping page {page_num} of {len(page_urls)}")
+        page_listings = scrape_zonaprop_page(page_url, session)
         all_listings.extend(page_listings)
-
-        if max_pages and page_num >= max_pages:
-            logger.info(f"Reached maximum number of pages ({max_pages})")
-            break
-
-        current_url = next_page_url
-        page_num += 1
-
-        if current_url:
-            logger.info(f"Moving to next page: {current_url}")
-        else:
-            logger.info("No more pages to scrape")
 
     return all_listings
 
 
 def main():
     parser = argparse.ArgumentParser(description='Scrape Zonaprop listings.')
-    parser.add_argument('--max_pages', type=int, default=1, help='Maximum number of pages to scrape')
-    parser.add_argument('--output', type=str, default='zonaprop_caballito_rentals_detailed.json', help='Output JSON file name')
+    parser.add_argument('--max_pages', type=int, default=2, help='Maximum number of pages to scrape')
+    parser.add_argument('--output', type=str, default='zonaprop_caballito_rentals.json', help='Output JSON file name')
     parser.add_argument('--url', type=str, default='https://www.zonaprop.com.ar/casas-departamentos-ph-alquiler-caballito.html', help='Starting URL for scraping')
     args = parser.parse_args()
 
