@@ -3,8 +3,27 @@ from bs4 import BeautifulSoup
 import json
 import re
 import time
+import logging
+import argparse
+from requests.adapters import HTTPAdapter
+from requests.packages.urllib3.util.retry import Retry
+from ratelimit import limits, sleep_and_retry
+
+# Set up logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
+
+def create_session_with_retries():
+    session = requests.Session()
+    retries = Retry(total=5, backoff_factor=0.1, status_forcelist=[500, 502, 503, 504])
+    session.mount('https://', HTTPAdapter(max_retries=retries))
+    return session
 
 def safe_extract(element, selector, attribute=None):
+    '''
+    Extracts text or attribute value from a BeautifulSoup element.
+    If the element or selector is not found, returns None.
+    '''
     found = element.select_one(selector)
     if not found:
         return None
@@ -12,65 +31,50 @@ def safe_extract(element, selector, attribute=None):
         return found.get(attribute)
     return found.get_text(strip=True)
 
-def scrape_zonaprop_page(url):
+# Rate limiting: 1 request per 5 seconds
+@sleep_and_retry
+@limits(calls=1, period=5)
+def rate_limited_request(session, url, headers):
+    try:
+        response = session.get(url, headers=headers)
+        response.raise_for_status()
+        return response
+    except requests.RequestException as e:
+        logger.error(f"Failed to fetch {url}: {e}")
+        return None
+
+def scrape_zonaprop_page(url, session):
     headers = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
     }
 
-    response = requests.get(url, headers=headers)
+    response = rate_limited_request(session, url, headers)
+    if not response:
+        return [], None
+
     soup = BeautifulSoup(response.content, 'html.parser')
 
     listings = []
-
-    # Find all listing containers
     listing_containers = soup.find_all('div', class_='PostingCardLayout-sc-i1odl-0')
 
-    print(f"Found {len(listing_containers)} listings on this page")
+    logger.info(f"Found {len(listing_containers)} listings on this page")
 
     for listing in listing_containers:
         try:
-            # Extract data using the safe_extract function
-            title = safe_extract(listing, 'h2.postingCard-title')
-            price = safe_extract(listing, 'div[data-qa="POSTING_CARD_PRICE"]')
-            expenses = safe_extract(listing, 'div[data-qa="expensas"]')
-            location_address = safe_extract(listing, 'div.postingAddress')
-            location_area = safe_extract(listing, 'h2[data-qa="POSTING_CARD_LOCATION"]')
-
-            features_div = listing.find('h3', class_='PostingMainFeaturesBlock-sc-1uhtbxc-0')
-            features = [span.text.strip() for span in features_div.find_all('span')] if features_div else []
-
-            description = safe_extract(listing, 'h3[data-qa="POSTING_CARD_DESCRIPTION"]')
-
-            url_element = listing.find('a', href=True)
-            url = f"https://www.zonaprop.com.ar{url_element['href']}" if url_element else None
-
-            # Extract property type and operation type from the URL
-            property_type = "Unknown"
-            operation_type = "Unknown"
-            if url:
-                url_parts = url.split('/')
-                if len(url_parts) > 3:
-                    property_operation = url_parts[3].split('-')
-                    if len(property_operation) > 1:
-                        property_type = property_operation[0]
-                        operation_type = property_operation[1]
-
-            listings.append({
-                'title': title,
-                'price': price,
-                'expenses': expenses,
-                'location_address': location_address,
-                'location_area': location_area,
-                'features': features,
-                'description': description,
-                'url': url,
-                'property_type': property_type,
-                'operation_type': operation_type
-            })
+            item = {
+                'title': safe_extract(listing, 'h2.postingCard-title'),
+                'price': safe_extract(listing, 'div[data-qa="POSTING_CARD_PRICE"]'),
+                'expenses': safe_extract(listing, 'div[data-qa="expensas"]'),
+                'location_address': safe_extract(listing, 'div.postingAddress'),
+                'location_area': safe_extract(listing, 'h2[data-qa="POSTING_CARD_LOCATION"]'),
+                'features': [span.text.strip() for span in listing.select('h3.PostingMainFeaturesBlock-sc-1uhtbxc-0 span')],
+                'description': safe_extract(listing, 'h3[data-qa="POSTING_CARD_DESCRIPTION"]'),
+                'url': f"https://www.zonaprop.com.ar{safe_extract(listing, 'a', 'href')}",
+            }
+            listings.append(item)
         except Exception as e:
-            print(f"Error parsing a listing: {e}")
+            logger.error(f"Error parsing a listing: {e}")
 
-    # Find the next page
     current_page = int(re.search(r'PAGING_(\d+)', str(soup)).group(1))
     next_page = soup.find('a', attrs={'data-qa': f'PAGING_{current_page + 1}'})
     next_page_url = f"https://www.zonaprop.com.ar{next_page['href']}" if next_page else None
@@ -81,34 +85,37 @@ def scrape_zonaprop(start_url, max_pages=None):
     all_listings = []
     current_url = start_url
     page_num = 1
+    session = create_session_with_retries()
 
     while current_url:
-        print(f"Scraping page {page_num}...")
-        page_listings, next_page_url = scrape_zonaprop_page(current_url)
+        logger.info(f"Scraping page {page_num}...")
+        page_listings, next_page_url = scrape_zonaprop_page(current_url, session)
         all_listings.extend(page_listings)
 
         if max_pages and page_num >= max_pages:
-            print(f"Reached maximum number of pages ({max_pages})")
+            logger.info(f"Reached maximum number of pages ({max_pages})")
             break
 
         current_url = next_page_url
         page_num += 1
 
-        # Add a delay to avoid overloading the server
-        time.sleep(2)
-
     return all_listings
 
 def main():
-    start_url = 'https://www.zonaprop.com.ar/casas-departamentos-ph-alquiler-caballito.html'
-    listings = scrape_zonaprop(start_url, max_pages=1)  # Limit to 1 pages for this example
+    parser = argparse.ArgumentParser(description='Scrape Zonaprop listings.')
+    parser.add_argument('--max_pages', type=int, default=1, help='Maximum number of pages to scrape')
+    parser.add_argument('--output', type=str, default='zonaprop_caballito_rentals.json', help='Output JSON file name')
+    parser.add_argument('--url', type=str, default='https://www.zonaprop.com.ar/casas-departamentos-ph-alquiler-caballito.html', help='Starting URL for scraping')
+    args = parser.parse_args()
+
+    listings = scrape_zonaprop(args.url, max_pages=args.max_pages)
 
     if listings:
-        with open('zonaprop_caballito_rentals.json', 'w', encoding='utf-8') as f:
+        with open(args.output, 'w', encoding='utf-8') as f:
             json.dump(listings, f, ensure_ascii=False, indent=4)
-        print(f"Scraped {len(listings)} listings and saved to zonaprop_caballito_rentals.json")
+        logger.info(f"Scraped {len(listings)} listings and saved to {args.output}")
     else:
-        print("No listings were found or scraped.")
+        logger.warning("No listings were found or scraped.")
 
 if __name__ == "__main__":
     main()
