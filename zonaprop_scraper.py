@@ -45,6 +45,7 @@ def rate_limited_request(session, url, headers):
 
 
 def scrape_listing_details(session, url):
+
     logger.info(f"Scraping detailed listing from: {url}")
     response = rate_limited_request(session, url, headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'})
     if not response:
@@ -54,8 +55,8 @@ def scrape_listing_details(session, url):
     soup = BeautifulSoup(response.content, 'html.parser')
     details = {}
 
+    # Extract feature information
     feature_section = soup.find('ul', id='section-icon-features-property')
-
     if feature_section:
         logger.info("Found feature section in the listing page")
         icon_to_attr = {
@@ -67,7 +68,7 @@ def scrape_listing_details(session, url):
             'icon-dormitorio': 'bedrooms',
             'icon-antiguedad': 'age'
         }
-        
+
         for icon_class, attr_name in icon_to_attr.items():
             element = feature_section.find('i', class_=icon_class)
             if element and element.parent:
@@ -83,8 +84,31 @@ def scrape_listing_details(session, url):
     else:
         logger.warning("Could not find feature section in the listing page")
 
+
+    # Extract publisher information from script tag
+    script_tags = soup.find_all('script')
+    for script in script_tags:
+        if script.string and "'publisher':" in script.string:
+            match = re.search(r"'publisher'\s*:\s*(\{[^}]+\})", script.string)
+            if match:
+                publisher_json = match.group(1).replace("'", '"')
+                try:
+                    publisher_data = json.loads(publisher_json)
+                    details['publisher_name'] = publisher_data.get('name')
+                    details['publisher_id'] = publisher_data.get('publisherId')
+                    details['publisher_url'] = publisher_data.get('url')
+                    logger.info(f"Extracted publisher data: {publisher_data}")
+                    break
+                except json.JSONDecodeError:
+                    logger.error("Error decoding publisher JSON")
+            else:
+                logger.warning("Could not find publisher data in script")
+    else:
+        logger.warning("Could not find script with publisher data")
+
     logger.info(f"Finished scraping details for listing: {url}")
     return details
+
 
 def scrape_zonaprop_page(url, session):
     logger.info(f"Scraping page: {url}")
@@ -116,8 +140,8 @@ def scrape_zonaprop_page(url, session):
                 'description': safe_extract(listing, 'h3[data-qa="POSTING_CARD_DESCRIPTION"]'),
                 'url': f"https://www.zonaprop.com.ar{safe_extract(listing, 'a', 'href')}",
             }
-            item['property_type'], item['operation_type'] = extract_property_operation_type(item['url'])
 
+            # Add detailed information
             logger.info(f"Scraping detailed information for listing: {item['url']}")
             detailed_info = scrape_listing_details(session, item['url'])
             item.update(detailed_info)
@@ -139,14 +163,6 @@ def scrape_zonaprop_page(url, session):
 
     return listings, next_page_url
 
-def extract_property_operation_type(url):
-    if url:
-        url_parts = url.split('/')
-        if len(url_parts) > 3:
-            property_operation = url_parts[3].split('-')
-            if len(property_operation) > 1:
-                return property_operation[0], property_operation[1]
-    return "Unknown", "Unknown"
 
 def scrape_zonaprop(start_url, max_pages=None):
     all_listings = []
@@ -173,6 +189,7 @@ def scrape_zonaprop(start_url, max_pages=None):
 
     return all_listings
 
+
 def main():
     parser = argparse.ArgumentParser(description='Scrape Zonaprop listings.')
     parser.add_argument('--max_pages', type=int, default=1, help='Maximum number of pages to scrape')
@@ -192,6 +209,7 @@ def main():
         logger.warning("No listings were found or scraped.")
 
     logger.info("Scraping process completed")
+
 
 if __name__ == "__main__":
     main()
