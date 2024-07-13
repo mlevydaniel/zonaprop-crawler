@@ -8,11 +8,16 @@ import argparse
 from requests.adapters import HTTPAdapter
 from requests.packages.urllib3.util.retry import Retry
 # from ratelimit import limits, sleep_and_retry
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from threading import Semaphore
 import random
 
 # Set up logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
+
+# Semaphore for detailed listing scrapes
+detail_semaphore = Semaphore(5)
 
 
 def create_session_with_retries():
@@ -46,69 +51,68 @@ def rate_limited_request(session, url, headers):
 
 
 def scrape_listing_details(session, url):
+    with detail_semaphore:
+        logger.info(f"Scraping detailed listing from: {url}")
+        response = rate_limited_request(session, url, headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'})
+        if not response:
+            logger.warning(f"No response received for listing: {url}")
+            return {}
 
-    logger.info(f"Scraping detailed listing from: {url}")
-    response = rate_limited_request(session, url, headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'})
-    if not response:
-        logger.warning(f"No response received for listing: {url}")
-        return {}
+        soup = BeautifulSoup(response.content, 'html.parser')
+        details = {}
 
-    soup = BeautifulSoup(response.content, 'html.parser')
-    details = {}
+        # Extract feature information
+        feature_section = soup.find('ul', id='section-icon-features-property')
+        if feature_section:
+            logger.info("Found feature section in the listing page")
+            icon_to_attr = {
+                'icon-stotal': 'total_area',
+                'icon-scubierta': 'covered_area',
+                'icon-ambiente': 'rooms',
+                'icon-bano': 'bathrooms',
+                'icon-cochera': 'parking_spaces',
+                'icon-dormitorio': 'bedrooms',
+                'icon-antiguedad': 'age'
+            }
 
-    # Extract feature information
-    feature_section = soup.find('ul', id='section-icon-features-property')
-    if feature_section:
-        logger.info("Found feature section in the listing page")
-        icon_to_attr = {
-            'icon-stotal': 'total_area',
-            'icon-scubierta': 'covered_area',
-            'icon-ambiente': 'rooms',
-            'icon-bano': 'bathrooms',
-            'icon-cochera': 'parking_spaces',
-            'icon-dormitorio': 'bedrooms',
-            'icon-antiguedad': 'age'
-        }
-
-        for icon_class, attr_name in icon_to_attr.items():
-            element = feature_section.find('i', class_=icon_class)
-            if element and element.parent:
-                value = element.parent.get_text(strip=True)
-                numeric_value = re.search(r'\d+', value)
-                if numeric_value:
-                    details[attr_name] = numeric_value.group()
-                    logger.info(f"Extracted {attr_name}: {details[attr_name]}")
+            for icon_class, attr_name in icon_to_attr.items():
+                element = feature_section.find('i', class_=icon_class)
+                if element and element.parent:
+                    value = element.parent.get_text(strip=True)
+                    numeric_value = re.search(r'\d+', value)
+                    if numeric_value:
+                        details[attr_name] = numeric_value.group()
+                        logger.info(f"Extracted {attr_name}: {details[attr_name]}")
+                    else:
+                        logger.warning(f"Could not extract numeric value for {attr_name}")
                 else:
-                    logger.warning(f"Could not extract numeric value for {attr_name}")
-            else:
-                logger.warning(f"Could not find element for {attr_name}")
-    else:
-        logger.warning("Could not find feature section in the listing page")
+                    logger.warning(f"Could not find element for {attr_name}")
+        else:
+            logger.warning("Could not find feature section in the listing page")
 
+        # Extract publisher information from script tag
+        script_tags = soup.find_all('script')
+        for script in script_tags:
+            if script.string and "'publisher':" in script.string:
+                match = re.search(r"'publisher'\s*:\s*(\{[^}]+\})", script.string)
+                if match:
+                    publisher_json = match.group(1).replace("'", '"')
+                    try:
+                        publisher_data = json.loads(publisher_json)
+                        details['publisher_name'] = publisher_data.get('name')
+                        details['publisher_id'] = publisher_data.get('publisherId')
+                        details['publisher_url'] = publisher_data.get('url')
+                        logger.info(f"Extracted publisher data: {publisher_data}")
+                        break
+                    except json.JSONDecodeError:
+                        logger.error("Error decoding publisher JSON")
+                else:
+                    logger.warning("Could not find publisher data in script")
+        else:
+            logger.warning("Could not find script with publisher data")
 
-    # Extract publisher information from script tag
-    script_tags = soup.find_all('script')
-    for script in script_tags:
-        if script.string and "'publisher':" in script.string:
-            match = re.search(r"'publisher'\s*:\s*(\{[^}]+\})", script.string)
-            if match:
-                publisher_json = match.group(1).replace("'", '"')
-                try:
-                    publisher_data = json.loads(publisher_json)
-                    details['publisher_name'] = publisher_data.get('name')
-                    details['publisher_id'] = publisher_data.get('publisherId')
-                    details['publisher_url'] = publisher_data.get('url')
-                    logger.info(f"Extracted publisher data: {publisher_data}")
-                    break
-                except json.JSONDecodeError:
-                    logger.error("Error decoding publisher JSON")
-            else:
-                logger.warning("Could not find publisher data in script")
-    else:
-        logger.warning("Could not find script with publisher data")
-
-    logger.info(f"Finished scraping details for listing: {url}")
-    return details
+        logger.info(f"Finished scraping details for listing: {url}")
+        return details
 
 
 def scrape_zonaprop_page(url, session):
@@ -171,22 +175,31 @@ def scrape_zonaprop(start_url, max_pages=None):
     page_num = 1
     session = create_session_with_retries()
 
-    while current_url:
-        logger.info(f"Scraping page {page_num}")
-        page_listings, next_page_url = scrape_zonaprop_page(current_url, session)
-        all_listings.extend(page_listings)
+    with ThreadPoolExecutor(max_workers=5) as executor:
+        future_to_url = {}
+        while current_url and (not max_pages or page_num <= max_pages):
+            logger.info(f"Submitting page {page_num} for scraping")
+            future = executor.submit(scrape_zonaprop_page, current_url, session)
+            future_to_url[future] = current_url
+            page_num += 1
 
-        if max_pages and page_num >= max_pages:
-            logger.info(f"Reached maximum number of pages ({max_pages})")
-            break
+            if len(future_to_url) >= 5 or not current_url:
+                for future in as_completed(future_to_url):
+                    url = future_to_url[future]
+                    try:
+                        page_listings, next_page_url = future.result()
+                        all_listings.extend(page_listings)
+                        logger.info(f"Completed scraping page: {url}")
+                    except Exception as exc:
+                        logger.error(f'{url} generated an exception: {exc}')
 
-        current_url = next_page_url
-        page_num += 1
+                future_to_url.clear()
 
-        if current_url:
-            logger.info(f"Moving to next page: {current_url}")
-        else:
-            logger.info("No more pages to scrape")
+            current_url = next_page_url
+            if current_url:
+                logger.info(f"Next page URL: {current_url}")
+            else:
+                logger.info("No more pages to scrape")
 
     return all_listings
 
@@ -210,7 +223,6 @@ def main():
         logger.warning("No listings were found or scraped.")
 
     logger.info("Scraping process completed")
-
 
 if __name__ == "__main__":
     main()
