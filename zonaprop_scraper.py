@@ -19,17 +19,15 @@ def create_session_with_retries():
     session.mount('https://', HTTPAdapter(max_retries=retries))
     return session
 
+
 def safe_extract(element, selector, attribute=None):
-    '''
-    Extracts text or attribute value from a BeautifulSoup element.
-    If the element or selector is not found, returns None.
-    '''
     found = element.select_one(selector)
     if not found:
         return None
     if attribute:
         return found.get(attribute)
     return found.get_text(strip=True)
+
 
 # Rate limiting: 1 request per 5 seconds
 @sleep_and_retry
@@ -42,6 +40,43 @@ def rate_limited_request(session, url, headers):
     except requests.RequestException as e:
         logger.error(f"Failed to fetch {url}: {e}")
         return None
+
+
+def scrape_listing_details(session, url):
+
+    response = rate_limited_request(session, url, headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'})
+    if not response:
+        return {}
+
+    soup = BeautifulSoup(response.content, 'html.parser')
+    details = {}
+
+    # Find the section with the specified attributes
+    feature_section = soup.find('ul', id='section-icon-features-property')
+
+    if feature_section:
+        # Dictionary to map icon classes to attribute names
+        icon_to_attr = {
+            'icon-stotal': 'total_area',
+            'icon-scubierta': 'covered_area',
+            'icon-ambiente': 'rooms',
+            'icon-bano': 'bathrooms',
+            'icon-cochera': 'parking_spaces',
+            'icon-dormitorio': 'bedrooms',
+            'icon-antiguedad': 'age'
+        }
+
+        for icon_class, attr_name in icon_to_attr.items():
+            element = feature_section.find('i', class_=icon_class)
+            if element and element.parent:
+                value = element.parent.get_text(strip=True)
+                # Extract only the numeric part
+                numeric_value = re.search(r'\d+', value)
+                if numeric_value:
+                    details[attr_name] = numeric_value.group()
+
+    return details
+
 
 def scrape_zonaprop_page(url, session):
     headers = {
@@ -62,7 +97,6 @@ def scrape_zonaprop_page(url, session):
     for listing in listing_containers:
         try:
             item = {
-                'title': safe_extract(listing, 'h2.postingCard-title'),
                 'price': safe_extract(listing, 'div[data-qa="POSTING_CARD_PRICE"]'),
                 'expenses': safe_extract(listing, 'div[data-qa="expensas"]'),
                 'location_address': safe_extract(listing, 'div.postingAddress'),
@@ -71,6 +105,11 @@ def scrape_zonaprop_page(url, session):
                 'description': safe_extract(listing, 'h3[data-qa="POSTING_CARD_DESCRIPTION"]'),
                 'url': f"https://www.zonaprop.com.ar{safe_extract(listing, 'a', 'href')}",
             }
+
+            # Scrape detailed information from the listing page
+            detailed_info = scrape_listing_details(session, item['url'])
+            item.update(detailed_info)
+
             listings.append(item)
         except Exception as e:
             logger.error(f"Error parsing a listing: {e}")
@@ -104,7 +143,7 @@ def scrape_zonaprop(start_url, max_pages=None):
 def main():
     parser = argparse.ArgumentParser(description='Scrape Zonaprop listings.')
     parser.add_argument('--max_pages', type=int, default=1, help='Maximum number of pages to scrape')
-    parser.add_argument('--output', type=str, default='zonaprop_caballito_rentals.json', help='Output JSON file name')
+    parser.add_argument('--output', type=str, default='zonaprop_caballito_rentals_detailed.json', help='Output JSON file name')
     parser.add_argument('--url', type=str, default='https://www.zonaprop.com.ar/casas-departamentos-ph-alquiler-caballito.html', help='Starting URL for scraping')
     args = parser.parse_args()
 
@@ -113,7 +152,7 @@ def main():
     if listings:
         with open(args.output, 'w', encoding='utf-8') as f:
             json.dump(listings, f, ensure_ascii=False, indent=4)
-        logger.info(f"Scraped {len(listings)} listings and saved to {args.output}")
+        logger.info(f"Scraped {len(listings)} detailed listings and saved to {args.output}")
     else:
         logger.warning("No listings were found or scraped.")
 
