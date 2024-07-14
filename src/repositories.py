@@ -35,14 +35,21 @@ class ZonapropRepository(ListingRepository):
         self.scraper_service = scraper_service
 
     def get_all_page_urls(self, start_url, max_pages=None):
-        logger.info(f"Getting all page URLs starting from: {start_url}")
+        logger.info(f"Getting page URLs starting from: {start_url}")
         page_urls = [start_url]
         current_url = start_url
         page_num = 1
 
         while current_url:
+
+            # Break if we reached the max pages limit
+            if max_pages is not None and page_num >= max_pages:
+                logger.info(f"Reached max pages limit: {max_pages}")
+                break
+
             response = self.scraper_service.rate_limited_request(current_url, headers={'User-Agent': 'Mozilla/5.0'})
             if not response:
+                logger.warning(f"Failed to get response from {current_url}")
                 break
 
             soup = BeautifulSoup(response.content, 'html.parser')
@@ -56,10 +63,7 @@ class ZonapropRepository(ListingRepository):
                 page_num += 1
                 logger.info(f"Found page {page_num}: {next_page_url}")
             else:
-                current_url = None
-
-            if max_pages and page_num >= max_pages:
-                logger.info(f"Reached maximum number of pages ({max_pages})")
+                logger.info("No more pages found")
                 break
 
         logger.info(f"Found a total of {len(page_urls)} pages")

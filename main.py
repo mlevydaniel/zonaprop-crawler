@@ -13,7 +13,7 @@ logger = logging.getLogger(__name__)
 
 def main():
     parser = argparse.ArgumentParser(description='Scrape Zonaprop listings.')
-    parser.add_argument('--max_pages', type=int, default=1, help='Maximum number of pages to scrape')
+    parser.add_argument('--max_pages', type=int, default=2, help='Maximum number of pages to scrape')
     parser.add_argument('--output', type=str, default='zonaprop_caballito_rentals.json', help='Output JSON file name')
     parser.add_argument('--url', type=str, default='https://www.zonaprop.com.ar/casas-departamentos-ph-alquiler-caballito.html', help='Starting URL for scraping')
     args = parser.parse_args()
