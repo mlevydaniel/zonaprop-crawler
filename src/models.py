@@ -5,6 +5,13 @@ from datetime import date
 
 @dataclass
 class Listing:
+    """
+    Domain model representing a single real-estate listing on Zonaprop.
+
+    The class starts with core attributes scraped from search result cards
+    and is later enriched with additional details obtained from the listing
+    detail page.
+    """
     id: str
     date: date
     price: str
@@ -27,6 +34,16 @@ class Listing:
     publisher_url: Optional[str] = None
 
     def update_details(self, details: dict):
+        """
+        Update this listing in-place with information.
+
+        Only attributes that already exist on `Listing` are set; unknown
+        keys in `details` are ignored (a warning is printed).
+
+        Args:
+            details: Dictionary where keys correspond to attribute names
+                on the `Listing` class and values contain the new data.
+        """
         for key, value in details.items():
             if hasattr(self, key):
                 setattr(self, key, value)
@@ -34,6 +51,15 @@ class Listing:
                 print(f"Warning: Attribute '{key}' not found in Listing class")
 
     def to_dict(self):
+        """
+        Convert the listing to a JSON-serializable dictionary.
+
+        Private attributes and `None` values are omitted. The `date`
+        attribute is converted to ISO 8601 string representation.
+
+        Returns:
+            A dictionary representation of the listing suitable for JSON.
+        """
         result = {
             key: value for key, value in self.__dict__.items()
             if not key.startswith('_') and value is not None

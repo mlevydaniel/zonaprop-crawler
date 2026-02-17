@@ -15,6 +15,14 @@ def clean_expenses_string(expenses_str):
 
 
 def safe_extract(element, selector, attribute=None):
+    """
+    Safely extract text or attribute value from an element.
+
+    Args:
+        element: BeautifulSoup element to search within.
+        selector: CSS selector to find the target element.
+        attribute: Optional attribute name to extract (e.g., 'href').
+    """
     found = element.select_one(selector)
     if not found:
         return None

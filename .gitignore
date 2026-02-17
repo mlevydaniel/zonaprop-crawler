@@ -3,3 +3,6 @@ __pycache__/
 example/
 storage/
 deprecated/
+credentials.json
+token.pickle
+.env

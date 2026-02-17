@@ -1,4 +1,7 @@
 from abc import ABC, abstractmethod
+from src.services import ScraperService
+from typing import List, Optional
+
 import logging
 import re
 import json
@@ -18,7 +21,7 @@ logger = logging.getLogger(__name__)
 
 class ListingRepository(ABC):
     @abstractmethod
-    def get_all_page_urls(self, start_url, max_pages=None):
+    def get_all_page_urls(self, start_url: str, max_pages: Optional[int] = None) -> List[str]:
         pass
 
     @abstractmethod
@@ -31,10 +34,30 @@ class ListingRepository(ABC):
 
 
 class ZonapropRepository(ListingRepository):
-    def __init__(self, scraper_service):
+    """
+    `ListingRepository` implementation for Zonaprop.
+
+    Encapsulates all Zonaprop-specific URL discovery and HTML parsing
+    required to build `Listing` objects from search result and detail pages.
+    """
+
+    def __init__(self, scraper_service: ScraperService):
         self.scraper_service = scraper_service
 
-    def get_all_page_urls(self, start_url, max_pages=None):
+    def get_all_page_urls(self, start_url: str, max_pages: Optional[int] = None) -> List[str]:
+        """
+        Discover all pagination URLs starting from the given Zonaprop URL.
+
+        Follows the "next page" links until either there are no more pages
+        or the optional `max_pages` limit is reached.
+
+        Args:
+            start_url: URL of the first Zonaprop results page.
+            max_pages: Optional maximum number of pages to include.
+
+        Returns:
+            List of strings with absolute URLs for each discovered page.
+        """
         logger.info(f"Getting page URLs starting from: {start_url}")
         page_urls = [start_url]
         current_url = start_url
@@ -70,11 +93,24 @@ class ZonapropRepository(ListingRepository):
         return page_urls
 
     def scrape_page(self, url):
+        """
+        Scrape all listing cards from a single Zonaprop results page.
+
+        For each card, this method builds a base `Listing` object using
+        summary information and then enriches it by fetching the detail page.
+
+        Args:
+            url: Absolute URL of the Zonaprop results page.
+
+        Returns:
+            List of fully-populated `Listing` instances.
+        """
         logger.info(f"Scraping page: {url}")
         headers = {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
         }
 
+        # Make a request to the results page
         response = self.scraper_service.rate_limited_request(url, headers)
         if not response:
             logger.error(f"Failed to get response from {url}")
@@ -89,11 +125,12 @@ class ZonapropRepository(ListingRepository):
         for index, listing in enumerate(listing_containers, start=1):
             logger.info(f"Processing listing {index} of {len(listing_containers)}")
             try:
+                # Extract the listing URL from the listing container
                 listing_url = f"https://www.zonaprop.com.ar{safe_extract(listing, 'a', 'href')}"
-
                 id_match = re.search(r'-(\d+)\.html$', listing_url)
                 listing_id = id_match.group(1) if id_match else None
 
+                # Build the listing object with the base information
                 item = Listing(
                     id=listing_id,
                     date=date.today(),
@@ -108,9 +145,14 @@ class ZonapropRepository(ListingRepository):
                 )
 
                 logger.info(f"Scraping detailed information for listing: {item.url}")
+
+                # Scrape additional information from the listing detail page
                 detailed_info = self.scrape_listing_details(item.url)
 
+                # Update the listing object with the additional information
                 item.update_details(detailed_info)
+
+                # Add the listing object to the list of listings
                 listings.append(item)
 
                 logger.info(f"Successfully processed listing {index} with ID {listing_id}")
@@ -120,7 +162,20 @@ class ZonapropRepository(ListingRepository):
         return listings
 
     def scrape_listing_details(self, url):
+        """
+        Scrape additional feature and publisher information for a listing.
+
+        This fetches the individual listing detail page to extract structured data.
+
+        Args:
+            url: Absolute URL of the listing detail page.
+
+        Returns:
+            Dictionary with extra attributes to update a `Listing`.
+        """
         logger.info(f"Scraping detailed listing from: {url}")
+
+        # Make a request to the listing page
         response = self.scraper_service.rate_limited_request(url, headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'})
         if not response:
             logger.warning(f"No response received for listing: {url}")
@@ -129,6 +184,7 @@ class ZonapropRepository(ListingRepository):
         soup = BeautifulSoup(response.content, 'html.parser')
         details = {}
 
+        # Extract information from the listing page
         details.update(self._extract_feature_information(soup))
         details.update(self._extract_publisher_information(soup))
 
@@ -136,6 +192,15 @@ class ZonapropRepository(ListingRepository):
         return details
 
     def _extract_feature_information(self, soup):
+        """
+        Extract structured feature information from a listing detail page.
+
+        Args:
+            soup: BeautifulSoup instance of the listing detail HTML.
+
+        Returns:
+            Dictionary mapping feature names to values.
+        """
         details = {}
         feature_section = soup.find('ul', id='section-icon-features-property')
         if feature_section:
@@ -150,6 +215,7 @@ class ZonapropRepository(ListingRepository):
                 'icon-antiguedad': 'age'
             }
 
+            # Extract the feature information by iterating over the icon_to_attr dictionary
             for icon_class, attr_name in icon_to_attr.items():
                 element = feature_section.find('i', class_=icon_class)
                 if element and element.parent:
@@ -168,8 +234,19 @@ class ZonapropRepository(ListingRepository):
         return details
 
     def _extract_publisher_information(self, soup):
+        """
+        Extract publisher metadata embedded in inline JavaScript.
+
+        Args:
+            soup: BeautifulSoup instance of the listing detail HTML.
+
+        Returns:
+            Dictionary with publisher-related fields.
+        """
         details = {}
         script_tags = soup.find_all('script')
+
+        # Extract the publisher data by iterating over the script tags
         for script in script_tags:
             if script.string and "'publisher':" in script.string:
                 match = re.search(r"'publisher'\s*:\s*(\{[^}]+\})", script.string)

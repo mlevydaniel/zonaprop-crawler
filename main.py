@@ -12,6 +12,19 @@ logger = logging.getLogger(__name__)
 
 
 def main():
+    """
+    Command-line entry point for the Zonaprop scraping tool.
+
+    This function parses CLI arguments, wires up the scraping components
+    (`ScraperService`, `ZonapropRepository`, `ScraperManager`), runs the
+    scraping process and persists the results to a JSON file.
+
+    CLI arguments:
+        --max_pages: Maximum number of result pages to traverse.
+        --output: Name of the output JSON file.
+        --url: Initial listings URL to start scraping from.
+    """
+
     parser = argparse.ArgumentParser(description='Scrape Zonaprop listings.')
     parser.add_argument('--max_pages', type=int, default=2, help='Maximum number of pages to scrape')
     parser.add_argument('--output', type=str, default='zonaprop_caballito_rentals.json', help='Output JSON file name')
